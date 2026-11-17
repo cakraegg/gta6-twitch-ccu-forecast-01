@@ -189,7 +189,18 @@ def hour_forecast(p1, pool, hour, z_values):
         if first and first > 0 and value and value > 0:
             points.append((math.log(first), math.log(value / first)))
     if len(points) < MIN_POINTS:
-        return flat_quantiles(p1, hour, z_values)
+        if not points:
+            return flat_quantiles(p1, hour, z_values)
+        # Too few curves to trust a line, but the ratios on hand still
+        # say more than a flat line: centre on their median (the v1
+        # shape) with a MAD spread, instead of pretending the curve
+        # stays at hour 1.
+        ratios = sorted(y for _, y in points)
+        centre = statistics.median(ratios)
+        spread = max(1.4826 * statistics.median(
+            [abs(y - centre) for y in ratios]), SIGMA_FLOOR)
+        return [round_half_up_cents(p1 * math.exp(centre + z * spread))
+                for z in z_values]
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     intercept, slope = fit_line(xs, ys)
