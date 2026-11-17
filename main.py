@@ -1,51 +1,61 @@
-"""gta6-twitch-ccu-forecast-01 entry in Python 3.13 (standard library only):
-launch-curve ratio forecast.
+"""gta6-twitch-ccu-forecast-01 entry, v2, in Python 3.13 (standard library only).
 
-Method (chosen by leave-one-out evaluation over the 37 launch comparables
-in the kit, each held out in turn and forecast from the rest):
-  - For every comparable with a usable release day (hour-1 print > 0 and at
-    least 20 of the 24 UTC hours present), take the per-hour log ratio
-    lr_h = ln(viewers_h / viewers_1) for h = 2..24.
-  - The forecast median for hour h is p1 * exp(median(lr_h)) and the spread
-    is a lognormal with sigma_h = 1.4826 * MAD(lr_h) (robust: the median
-    absolute deviation, so the handful of simultaneous-global launches
-    whose hour-1 print was ~0 and whose ratios run into the thousands do
-    not blow up the spread), shrunk by 0.9 (a mild calibration: without it
-    the 90% band over-covers at ~0.93; with it ~0.91, close to honest).
-  - Quantiles: q_tau(h) = p1 * exp(mu_h + z_tau * sigma_h), rounded to 2
-    decimals, half up.
+Forecasts the launch-day Twitch curve by conditioning on launch size.
 
-Why this shape: launch days are not flat. Across past big launches the
-median curve dips to ~0.75x hour 1 in the small hours (03:00-05:00Z, before
-the US unlocks), then climbs through the day to ~2.4x at 19:00-20:00Z (the
-European evening + US afternoon peak) and eases to ~2.0x by 24:00Z. The
-house baseline (flat at hour 1, sigma 0.15*sqrt(h-1)) misses that shape
-entirely.
+Why v1 was not enough (diagnosis from the server practice board, 17 Nov):
+v1 took the median log-ratio to hour 1 across every usable comparable and
+put one lognormal spread around it. That ignores a strong, systematic
+pattern in the data: the bigger the hour-1 print, the smaller the later
+ratios. Across the 37 usable comparables the correlation between
+log(hour-1) and the log-ratio at peak hours is about -0.9, and inside the
+big-clean subset it is about -0.8. A constant median therefore overstates
+the evening peak of a huge launch roughly twofold (v1 said 2.4x hour 1 at
+20:00Z; the size-conditioned fit says about 1.4x for a 270k hour-1 print)
+and understates the growth of a small one. The server practice board
+showed it: v1 loss 0.276, rank 2,410/2,673, while the field median was
+0.211. The median was the problem, not the spread.
 
-Leave-one-out results on the 19 representative pseudo-targets (clean tier,
-rolling-midnight unlock, hour-1 >= 5,000 viewers -- the profile GTA VI
-itself has): pinball loss 0.323 vs the starter baseline's 0.403, typical
-miss 64% vs 83%, 90% coverage 0.91 vs 0.75. Variants tested and rejected
-with their representative-target losses: UTC alignment beats
-unlock-aligned (0.323 vs ~0.34-0.36); empirical quantiles of the full
-pool (0.383) lose to the robust lognormal (0.323); trimming the pool to
-clean-tier only (0.326) ties the full pool but uses fewer curves; sigma
-multipliers 0.8-1.25 are flat around 0.9-1.0, so 0.9 is a mild calibration,
-not a tuned spike; smoothing the median across hours and using the mean
-instead of the median change nothing (0.326/0.331). The GTA VI premiere
-comparable is not a launch (no release-day curve) and is skipped
-automatically by the usability filter, like any comparable without a
-valid hour 1.
+Method (v2):
+  - Keep only launch curves that look like the target: clean tier (no
+    early-access contamination, no weak tier) and hour-1 print at least
+    5,000. When that set has fewer than 8 curves, widen it to all clean
+    curves, then to every usable curve.
+  - For each forecast hour, fit an ordinary least squares line through
+    the pool's points (log hour-1, log viewers_h / viewers_1). The
+    target's median is the line evaluated at its own log hour-1.
+  - Do not extrapolate the line past the pool: the target's log hour-1
+    is clamped to the smallest and largest log hour-1 in the pool. A
+    launch bigger than anything seen before is scored like the biggest
+    seen launch, not like a point far down an unbounded line.
+  - The spread is the residual standard deviation of that hour's fit
+    (floored at 0.05), and the five quantiles are lognormal around the
+    fitted median.
+  - Too few points for an hour, or too few curves overall, falls back
+    to the flat house baseline for that hour or case.
 
-Deterministic: no randomness, no wall clock, no network; the comparables
-are read in file order and every statistic is a deterministic function of
-them, so two runs write byte-identical output. One case runs in well
-under a second.
+Leave-one-out over the 37 comparables (same harness as v1, 19
+representative targets: clean tier, rolling-midnight, hour-1 >= 5,000),
+measured on this file as shipped: v2 loss 0.262 against v1's 0.323,
+typical miss 46% against 64%, coverage 0.87. On the 8 practice-like
+targets (rolling, clean, hour-1 >= 20,000) v2 scores 0.275 against
+v1's 0.312. The clamp to the pool's observed size range is included
+in those numbers; without it the representative loss is 0.265. The features a
+second predictor could add were tested and rejected: viewers per
+channel, platform flags and weekday move the score by less than 0.01
+or make it worse, and the pre-release day's curve does not predict
+the release day at all (loss about 0.9). Shrinking the slope toward
+zero also hurts badly (0.33 at 10% shrinkage), so the line is used
+as fitted.
 
-How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0) in
-python:3.13-slim, standard library only: no network, no pip packages. -P
-keeps this file's directory OFF sys.path, so the sys.path line below puts
-it back first (harmless here: this entry is a single file).
+Deterministic: no randomness, no wall clock, no network; comparables
+are read in file order and every statistic is a deterministic function
+of them, so two runs write byte-identical output. One case runs in
+well under a second.
+
+How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0)
+in python:3.13-slim, standard library only: no network, no pip
+packages. -P keeps this file's directory OFF sys.path, so the sys.path
+line below puts it back first (harmless here: this entry is one file).
 """
 
 import json
@@ -64,85 +74,70 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 # The quantile levels the contest scores, in the order each row lists them.
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-# The standard normal's quantile at each level (Acklam's approximation
-# below reproduces these to ~1e-9; they are kept as the exact values the
-# forecast uses when the case asks for exactly these levels).
-Z = [-1.6448536269514722, -0.6744897501960817, 0.0, 0.6744897501960817, 1.6448536269514722]
-# Mild calibration of the robust spread (see module docstring).
-SIGMA_SHRINK = 0.9
-# A comparable counts as a usable launch curve only with a positive
-# hour-1 print and at least this many of the 24 release-day hours present.
+# Inverse standard normal CDF at each level, from the standard library.
+Z_VALUES = [statistics.NormalDist().inv_cdf(level) for level in LEVELS]
+# A launch curve counts as usable with a positive hour-1 print and at
+# least this many of the 24 release-day hours present.
 MIN_HOURS = 20
-# Floor for the log spread, so an hour whose comparables agree almost
-# exactly still carries a sane band.
+# The size-conditioned pool wants clean launches with a real audience.
+REP_MIN_HOUR1 = 5000
+# A regression needs at least this many curves to be trusted.
+MIN_POOL = 8
+# Fewer usable curves than this and the whole case is the flat baseline.
+MIN_CURVES = 3
+# Fewer points than this for one hour and that hour is the flat baseline.
+MIN_POINTS = 5
+# Floor for the log spread, so an hour whose fit is nearly exact still
+# carries a sane band.
 SIGMA_FLOOR = 0.05
 
 
-def round2(x: float) -> float | int:
-    """x rounded to 2 decimals, half up, as JavaScript's Math.round(x * 100) / 100 rounds it.
+def round_half_up_cents(x):
+    """Round x to 2 decimals, halves up, returning an int when whole.
 
-    A whole number comes back as an int, so json.dumps writes 1240 where JavaScript writes 1240 (not 1240.0).
+    Quantiles are positive here, so the floor formulation is exact.
     """
-    scaled = x * 100
-    whole = math.floor(scaled)
-    if scaled - whole >= 0.5:
-        whole += 1
-    value = whole / 100
-    return int(value) if value.is_integer() else value
+    cents = math.floor(x * 100.0 + 0.5)
+    value = cents / 100.0
+    return int(value) if value == int(value) else value
 
 
-def norm_ppf(p: float) -> float:
-    """Inverse standard normal CDF (Acklam's rational approximation, |err| < 1.15e-9)."""
-    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285984469534e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
-    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01]
-    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
-    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00]
-    plow = 0.02425
-    phigh = 1 - plow
-    if p < plow:
-        q = math.sqrt(-2 * math.log(p))
-        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-            ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
-    if p > phigh:
-        q = math.sqrt(-2 * math.log(1 - p))
-        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-            ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
-    q = p - 0.5
-    r = q * q
-    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
-        (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+def parse_time(text):
+    """Parse an ISO timestamp, accepting a trailing Z for UTC."""
+    if text.endswith("Z"):
+        return datetime.fromisoformat(text[:-1] + "+00:00")
+    return datetime.fromisoformat(text)
 
 
-def parse_ts(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
-
-
-def release_day_series(comp: dict) -> dict:
+def day_hours(comp):
     """UTC hour (1..24 of the comparable's release day) -> viewers."""
-    day_start = parse_ts(comp["day_start"])
-    out = {}
+    start = parse_time(comp["day_start"])
+    series = {}
     for row in comp.get("hourly", []):
         viewers = row.get("viewers")
         if viewers is None:
             continue
-        hour = int((parse_ts(row["from"]) - day_start).total_seconds() // 3600) + 1
+        hour = int((parse_time(row["from"]) - start).total_seconds() // 3600) + 1
         if 1 <= hour <= 24:
-            out[hour] = viewers
-    return out
+            series[hour] = viewers
+    return series
 
 
-def usable_curve(comp: dict) -> dict | None:
-    """A comparable's release-day series, or None when it is not a launch curve.
+def is_clean(comp):
+    """True when the comparable's unlock is not flagged as contaminated."""
+    unlock = comp.get("unlock", "")
+    return ("early-access-contaminated" not in unlock
+            and "Tier: weak" not in unlock)
 
-    Skips the GTA VI premiere entry (its 'release day' is a premiere, with
-    no hour-1 print) and any comparable whose hour 1 is missing, zero, or
-    whose day is too sparsely sampled to give a curve.
+
+def launch_curve(comp):
+    """A comparable's release-day series, or None when it is not a launch.
+
+    Skips the GTA VI premiere entry (its 'release day' is a premiere,
+    with no hour-1 print) and any comparable whose hour 1 is missing or
+    zero, or whose day is too sparsely sampled to give a curve.
     """
-    series = release_day_series(comp)
+    series = day_hours(comp)
     if not series.get(1) or series[1] <= 0:
         return None
     if len(series) < MIN_HOURS:
@@ -150,61 +145,93 @@ def usable_curve(comp: dict) -> dict | None:
     return series
 
 
-def log_ratios(curves: list, hour: int) -> list:
-    """ln(viewers_h / viewers_1) across the usable curves that have both hours."""
-    ratios = []
-    for series in curves:
-        v1 = series.get(1)
-        vh = series.get(hour)
-        if v1 and v1 > 0 and vh and vh > 0:
-            ratios.append(math.log(vh / v1))
-    return ratios
+def pick_pool(curves):
+    """The curves the regression is fitted on, widest fallback last.
+
+    curves is a list of (series, clean) pairs. Prefer clean launches
+    with a real hour-1 audience; widen only when that set is too small
+    to fit a line on.
+    """
+    rep = [(s, c) for (s, c) in curves
+           if c and s[1] >= REP_MIN_HOUR1]
+    if len(rep) >= MIN_POOL:
+        return [s for (s, c) in rep]
+    clean = [s for (s, c) in curves if c]
+    if len(clean) >= MIN_POOL:
+        return clean
+    return [s for (s, c) in curves]
 
 
-def hour_quantiles(p1: float, curves: list, hour: int, z_values: list) -> list:
-    """The five quantiles for one hour: p1 * exp(mu + z * sigma)."""
-    ratios = log_ratios(curves, hour)
-    if len(ratios) < 5:
-        # Too few comparables cover this hour for a median/MAD to mean
-        # anything (a sparse comparable set in the final, say): fall back
-        # to the flat baseline shape for this hour only.
-        return [round2(p1 * math.exp(z * 0.15 * math.sqrt(hour - 1))) for z in z_values]
-    mu = statistics.median(ratios)
-    mad = statistics.median([abs(x - mu) for x in ratios])
-    sigma = max(1.4826 * mad, SIGMA_FLOOR) * SIGMA_SHRINK
-    qs = [round2(p1 * math.exp(mu + z * sigma)) for z in z_values]
+def fit_line(xs, ys):
+    """Least-squares intercept and slope of y on x."""
+    n = len(xs)
+    mean_x = statistics.fmean(xs)
+    mean_y = statistics.fmean(ys)
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx == 0:
+        return mean_y, 0.0
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / sxx
+    return mean_y - slope * mean_x, slope
+
+
+def flat_quantiles(p1, hour, z_values):
+    """The house baseline shape for one hour (flat at hour 1, widening)."""
+    return [round_half_up_cents(p1 * math.exp(z * 0.15 * math.sqrt(hour - 1)))
+            for z in z_values]
+
+
+def hour_forecast(p1, pool, hour, z_values):
+    """The five quantiles for one hour from the size-conditioned fit."""
+    points = []
+    for series in pool:
+        first = series.get(1)
+        value = series.get(hour)
+        if first and first > 0 and value and value > 0:
+            points.append((math.log(first), math.log(value / first)))
+    if len(points) < MIN_POINTS:
+        return flat_quantiles(p1, hour, z_values)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    intercept, slope = fit_line(xs, ys)
+    # Stay inside the observed size range: never extrapolate the line.
+    x_target = min(max(math.log(p1), min(xs)), max(xs))
+    centre = intercept + slope * x_target
+    residuals = [y - (intercept + slope * x) for x, y in points]
+    spread = max(statistics.pstdev(residuals), SIGMA_FLOOR)
+    qs = [round_half_up_cents(p1 * math.exp(centre + z * spread))
+          for z in z_values]
     for i in range(1, len(qs)):
         qs[i] = max(qs[i], qs[i - 1])
     return qs
 
 
-def forecast_case(case: dict, name: str) -> dict:
+def forecast_case(case, name):
+    """Forecast one case: 23 rows, hours 2..24, five quantiles each."""
     levels = case["levels"]
     if levels == LEVELS:
-        z_values = Z
+        z_values = Z_VALUES
     else:
-        z_values = [norm_ppf(level) for level in levels]
+        z_values = [statistics.NormalDist().inv_cdf(level) for level in levels]
     first = next((k for k in case["known"] if k["hour"] == 1), None)
     if first is None:
         raise ValueError(f"{name} has no hour-1 print")
     p1 = max(1, first["viewers"])
     curves = []
     for comp in case.get("comparables", []):
-        series = usable_curve(comp)
+        series = launch_curve(comp)
         if series is not None:
-            curves.append(series)
-    if len(curves) < 3:
-        # Too few launch curves to learn a shape from: the flat baseline.
+            curves.append((series, is_clean(comp)))
+    if len(curves) < MIN_CURVES:
         return {"hours": [{"hour": row["hour"],
-                           "q": [round2(p1 * math.exp(z * 0.15 * math.sqrt(row["hour"] - 1)))
-                                 for z in z_values]}
+                           "q": flat_quantiles(p1, row["hour"], z_values)}
                           for row in case["forecast"]]}
+    pool = pick_pool(curves)
     return {"hours": [{"hour": row["hour"],
-                       "q": hour_quantiles(p1, curves, row["hour"], z_values)}
+                       "q": hour_forecast(p1, pool, row["hour"], z_values)}
                       for row in case["forecast"]]}
 
 
-def main() -> None:
+def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # Every case file, in name order, so two runs write the same bytes.
     for path in sorted(INPUT_DIR.glob("*.in")):
